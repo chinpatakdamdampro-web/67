@@ -26,7 +26,7 @@ public class MovementController {
     private static final double MIN_COMBAT_RANGE    = 1.4;
     private static final double MIN_COMBAT_RANGE_SQ = MIN_COMBAT_RANGE * MIN_COMBAT_RANGE;
 
-    // Follow stops this many blocks from the target — feels natural, not "touching"
+    // Follow stops this many blocks from the target â€” feels natural, not "touching"
     private static final double FOLLOW_STOP_DIST    = 2.5;
     private static final double FOLLOW_WALK_DIST    = 5.0; // walk when this close, sprint when farther
 
@@ -48,18 +48,18 @@ public class MovementController {
     }
 
     // -------------------------------------------------------------------------
-    // Follow movement — stops FOLLOW_STOP_DIST blocks away, slows when close
+    // Follow movement â€” stops FOLLOW_STOP_DIST blocks away, slows when close
     // FIX Bug 1: was stopping at 0.5 (touching). Now stops at 2.5 blocks.
     // -------------------------------------------------------------------------
 
     public void moveTo(Vec3d destination, boolean followMode) {
         EntityPlayerMPFake fp = bot.getFakePlayer();
-        double dist = fp.getPos().horizontalDistanceTo(destination);
+        double dist = horizDist(fp.getPos(), destination);
 
         double stopDist = followMode ? FOLLOW_STOP_DIST : 0.5;
 
         if (dist < stopDist) {
-            // Close enough — bleed off horizontal velocity naturally
+            // Close enough â€” bleed off horizontal velocity naturally
             Vec3d vel = fp.getVelocity();
             fp.setVelocity(vel.x * 0.4, vel.y, vel.z * 0.4);
             setSprinting(false);
@@ -87,12 +87,12 @@ public class MovementController {
 
     // -------------------------------------------------------------------------
     // Sprint directly to a position (used by orbital retreat manoeuvre)
-    // No follow dead-band — intended for precise tactical positioning
+    // No follow dead-band â€” intended for precise tactical positioning
     // -------------------------------------------------------------------------
 
     public void sprintTo(Vec3d destination) {
         EntityPlayerMPFake fp = bot.getFakePlayer();
-        double dist = fp.getPos().horizontalDistanceTo(destination);
+        double dist = horizDist(fp.getPos(), destination);
 
         if (dist < 0.6) {
             Vec3d vel = fp.getVelocity();
@@ -115,7 +115,7 @@ public class MovementController {
     }
 
     // -------------------------------------------------------------------------
-    // FIX Bug 3 — Jump over blocks in the path
+    // FIX Bug 3 â€” Jump over blocks in the path
     // Checks one block ahead in the movement direction. If there's a solid
     // block at foot level and open space above it, jump.
     // -------------------------------------------------------------------------
@@ -173,7 +173,7 @@ public class MovementController {
         if (distSq < MIN_COMBAT_RANGE_SQ) {
             backAwayFrom(target);
         } else if (distSq > reachSq * 4) {
-            // Far away — sprint in, using combat moveTo (no follow dead-band)
+            // Far away â€” sprint in, using combat moveTo (no follow dead-band)
             moveTowardsCombat(target.getPos(), true);
         } else if (distSq > preferredSq) {
             moveTowardsCombat(target.getPos(), true);
@@ -191,10 +191,10 @@ public class MovementController {
         }
     }
 
-    // Internal combat movement — small stop distance (0.5), no follow dead-band
+    // Internal combat movement â€” small stop distance (0.5), no follow dead-band
     private void moveTowardsCombat(Vec3d dest, boolean sprint) {
         EntityPlayerMPFake fp = bot.getFakePlayer();
-        double dist = fp.getPos().horizontalDistanceTo(dest);
+        double dist = horizDist(fp.getPos(), dest);
         if (dist < 0.5) return;
 
         double dx = dest.x - fp.getX();
@@ -284,7 +284,7 @@ public class MovementController {
         return falling;
     }
 
-    /** True when airborne and falling (any cause — jump, wind burst, etc.) */
+    /** True when airborne and falling (any cause â€” jump, wind burst, etc.) */
     public boolean isAirborneFalling() {
         EntityPlayerMPFake fp = bot.getFakePlayer();
         return !fp.isOnGround() && fp.getVelocity().y < -0.05;
@@ -344,6 +344,13 @@ public class MovementController {
     private double horizontalSpeed(EntityPlayerMPFake fp) {
         var vel = fp.getVelocity();
         return Math.sqrt(vel.x * vel.x + vel.z * vel.z);
+    }
+
+    /** XZ-only distance between two Vec3d positions (ignores Y). */
+    private static double horizDist(Vec3d a, Vec3d b) {
+        double dx = a.x - b.x;
+        double dz = a.z - b.z;
+        return Math.sqrt(dx * dx + dz * dz);
     }
 
     public boolean isSprinting()                  { return sprinting; }
