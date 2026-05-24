@@ -78,7 +78,6 @@ public class CombatController {
     private int     orbitalRetreatTimer  = 0;
     private static final int RETREAT_BLOCKS        = 11;
     private static final int ORBITAL_RETREAT_TICKS = 80;
-    private static final int COBWEB_COOLDOWN_TICKS = 400;
     private int cobwebCooldown = 0;
 
     // Retreat
@@ -310,24 +309,30 @@ public class CombatController {
     // =========================================================================
 
     // =========================================================================
-    // Cobweb trap + orbital retreat
+    // Cobweb trap
     //
     // Trigger: target within 4 blocks, bot has 2+ cobwebs, cooldown expired.
-    // The webbing happens REGARDLESS of whether StabShot is installed.
-    // The orbital shot only fires IF StabShot is installed.
     //
-    // BUG FIXES:
-    //  1. Removed isOrbitalModLoaded() gate from webbing â€” webs fire always.
-    //  2. combatMoveTo is skipped while cobwebTrapActive so retreat isn't overridden.
-    //  3. cobwebTrapActive flag blocks normal combat movement during retreat.
+    // ULTRA_HARD only:
+    //   - Bot webs the player, retreats 11 blocks, fires orbital strike.
+    //   - Cooldown: 600 ticks (30 seconds). Orbital fires max once per engage.
+    //   - 40% random chance per trigger so multiple bots don't all orbital at once.
+    //
+    // Other difficulties (EASY / MEDIUM / HARD):
+    //   - Bot webs the player then immediately does a breach swap crit on them.
+    //   - The webbed player can't dodge â€” guaranteed crit landing.
+    //   - Cooldown: 400 ticks (20 seconds).
     // =========================================================================
+
+    private static final int COBWEB_COOLDOWN_ORBITAL     = 600; // 30s â€” ultra hard
+    private static final int COBWEB_COOLDOWN_BREACH       = 400; // 20s â€” other difficulties
+    private static final int ORBITAL_TRIGGER_CHANCE_PCT   = 40;  // % chance per check
 
     private void tickCobwebTrap(ServerPlayerEntity target) {
         if (cobwebCooldown > 0) return;
         if (!inventory.hasCobwebs(2)) return;
 
         if (cobwebTrapActive) {
-            // Movement is handled here â€” skip combatMoveTo in main tick
             tickCobwebRetreat(target);
             return;
         }
@@ -340,29 +345,40 @@ public class CombatController {
         var targetFeet = target.getBlockPos();
         boolean placedFeet = inventory.placeCobwebAt(targetFeet);
         boolean placedHead = inventory.placeCobwebAt(targetFeet.up());
+        if (!placedFeet && !placedHead) return;
 
-        if (!placedFeet && !placedHead) return; // no cobwebs placed
+        boolean isUltraHard = cfg.difficulty == BotConfig.Difficulty.ULTRA_HARD;
 
-        // Calculate retreat position: RETREAT_BLOCKS directly away from target
-        EntityPlayerMPFake fp = bot.getFakePlayer();
-        double dx = fp.getX() - target.getX();
-        double dz = fp.getZ() - target.getZ();
-        double len = Math.sqrt(dx * dx + dz * dz);
-        if (len < 0.001) { dx = 1; dz = 0; } else { dx /= len; dz /= len; }
+        if (isUltraHard && isOrbitalModLoaded()
+                && rng.nextInt(100) < ORBITAL_TRIGGER_CHANCE_PCT) {
+            // ULTRA HARD: retreat and fire orbital
+            EntityPlayerMPFake fp = bot.getFakePlayer();
+            double dx = fp.getX() - target.getX();
+            double dz = fp.getZ() - target.getZ();
+            double len = Math.sqrt(dx * dx + dz * dz);
+            if (len < 0.001) { dx = 1; dz = 0; } else { dx /= len; dz /= len; }
 
-        orbitalRetreatTarget = new Vec3d(
-                fp.getX() + dx * RETREAT_BLOCKS,
-                fp.getY(),
-                fp.getZ() + dz * RETREAT_BLOCKS
-        );
-        orbitalRetreatTimer = ORBITAL_RETREAT_TICKS;
-        cobwebTrapActive    = true;
+            orbitalRetreatTarget = new Vec3d(
+                    fp.getX() + dx * RETREAT_BLOCKS,
+                    fp.getY(),
+                    fp.getZ() + dz * RETREAT_BLOCKS
+            );
+            orbitalRetreatTimer = ORBITAL_RETREAT_TICKS;
+            cobwebTrapActive    = true;
+            cobwebCooldown      = COBWEB_COOLDOWN_ORBITAL;
+        } else {
+            // ALL OTHER DIFFICULTIES: immediate breach swap crit on webbed player
+            // Player is stuck â€” guaranteed crit opportunity
+            if (inventory.hasBreachMace()) {
+                currentPattern = ComboPattern.BREACH_SWAP;
+                comboStep      = 0; // full sequence: sword hit then mace crit
+            }
+            cobwebCooldown = COBWEB_COOLDOWN_BREACH;
+        }
     }
 
     private void tickCobwebRetreat(ServerPlayerEntity target) {
         orbitalRetreatTimer--;
-
-        // Sprint away from target toward retreat point
         movement.sprintTo(orbitalRetreatTarget);
 
         Vec3d botPos = bot.getFakePlayer().getPos();
@@ -371,18 +387,15 @@ public class CombatController {
         double distToRetreat = Math.sqrt(dxR * dxR + dzR * dzR);
         double distToTarget  = Math.sqrt(targeting.distanceToTargetSq());
 
-        boolean reachedSpot   = distToRetreat < 1.5;
-        boolean farEnough     = distToTarget >= RETREAT_BLOCKS - 2;
-        boolean timerExpired  = orbitalRetreatTimer <= 0;
+        boolean reachedSpot  = distToRetreat < 1.5;
+        boolean farEnough    = distToTarget >= RETREAT_BLOCKS - 2;
+        boolean timerExpired = orbitalRetreatTimer <= 0;
 
         if (reachedSpot || farEnough || timerExpired) {
-            // Arrived â€” face target and fire orbital if available
             movement.lookAtTarget(target);
             cobwebTrapActive     = false;
             orbitalRetreatTarget = null;
-            cobwebCooldown       = COBWEB_COOLDOWN_TICKS;
 
-            // Only fire orbital if StabShot is installed
             if (isOrbitalModLoaded()) {
                 var world = (ServerWorld) bot.getFakePlayer().getWorld();
                 fireOrbitalStabReflection(target, world);
@@ -671,13 +684,16 @@ public class CombatController {
         }
     }
 
+    // Timeout for breach swap step 1 â€” force swing after this many ticks if neither falling nor ground resolves
+    private int breachSwapStep1Timeout = 0;
+    private static final int BREACH_SWAP_TIMEOUT = 10;
+
     /**
      * BREACH_SWAP:
-     *   Step 0 â€” sword hit with short cooldown override for rapid mace follow-up.
-     *   Step 1 â€” equip breach mace, jump for crit if on ground, OR if already
-     *            falling (from wind burst / previous jump) swing immediately as
-     *            a natural crit. This is the "wind burst airborne breach crit"
-     *            feature â€” bot was knocked up, waits for descent, swings mace.
+     *   Step 0 â€” sword hit, short cooldown override.
+     *   Step 1 â€” equip mace. If falling â†’ crit now. If on ground â†’ jump and wait.
+     *            Timeout after BREACH_SWAP_TIMEOUT ticks to prevent holding mace forever.
+     *   Step 2 â€” wait for descent arc, then swing.
      */
     private void doBreachSwap(ServerPlayerEntity target) {
         switch (comboStep) {
@@ -685,33 +701,37 @@ public class CombatController {
                 inventory.equipBestWeapon(false);
                 bot.getFakePlayer().setCurrentHand(Hand.MAIN_HAND);
                 bot.getFakePlayer().attack(target);
-                // Short cooldown so mace follows quickly
                 attackCooldown = 2 + rng.nextInt(2);
+                breachSwapStep1Timeout = 0;
                 comboStep = 1;
             }
             case 1 -> {
                 if (!inventory.equipBreachMace()) { finishCombo(); return; }
                 bot.getFakePlayer().setCurrentHand(Hand.MAIN_HAND);
 
-                boolean isFalling = bot.getFakePlayer().getVelocity().y < -0.05;
-                boolean isOnGround = bot.getFakePlayer().isOnGround();
+                breachSwapStep1Timeout++;
 
-                if (isFalling) {
-                    // Already descending â€” this is a natural crit, swing now
+                boolean isFalling  = bot.getFakePlayer().getVelocity().y < -0.05;
+                boolean isOnGround = bot.getFakePlayer().isOnGround();
+                boolean timedOut   = breachSwapStep1Timeout >= BREACH_SWAP_TIMEOUT;
+
+                if (isFalling || timedOut) {
+                    // Falling naturally = crit. Timed out = force swing anyway.
                     bot.getFakePlayer().attack(target);
                     setNextAttackCooldown();
                     inventory.scheduleSwapBackToSword();
+                    breachSwapStep1Timeout = 0;
                     finishCombo();
                 } else if (isOnGround) {
-                    // On ground â€” jump for crit and wait for descent
                     movement.jumpForCrit();
                     waitingForCrit = true;
-                    comboStep = 2; // wait in step 2
+                    breachSwapStep1Timeout = 0;
+                    comboStep = 2;
                 }
-                // else: still rising from wind burst â€” wait here until falling
+                // still rising from wind burst â€” wait, timeout will catch it
             }
             case 2 -> {
-                // Waiting for crit arc peak (descending)
+                // Waiting for descent
                 if (bot.getFakePlayer().getVelocity().y < -0.05) {
                     waitingForCrit = false;
                     bot.getFakePlayer().setCurrentHand(Hand.MAIN_HAND);
@@ -811,17 +831,18 @@ public class CombatController {
     }
 
     private void resetPartial() {
-        comboStep             = 0;
-        attackCooldown        = 0;
-        sprintResetTimer      = 0;
-        waitingForCrit        = false;
-        axeSwapCooldown       = 0;
-        smpShieldTimer        = 0;
-        orbitalStrikeCooldown = 0;
-        targetInWebTicks      = 0;
-        cobwebTrapActive      = false;
-        orbitalRetreatTarget  = null;
-        orbitalRetreatTimer   = 0;
+        comboStep              = 0;
+        attackCooldown         = 0;
+        sprintResetTimer       = 0;
+        waitingForCrit         = false;
+        axeSwapCooldown        = 0;
+        smpShieldTimer         = 0;
+        orbitalStrikeCooldown  = 0;
+        targetInWebTicks       = 0;
+        cobwebTrapActive       = false;
+        orbitalRetreatTarget   = null;
+        orbitalRetreatTimer    = 0;
+        breachSwapStep1Timeout = 0;
         pickNewPattern();
     }
 
@@ -843,4 +864,4 @@ public class CombatController {
 
     public boolean isShielding()          { return shielding; }
     public String getCurrentPatternName() { return currentPattern != null ? currentPattern.name() : "NONE"; }
-    }
+}
